@@ -6,8 +6,9 @@ import torch.nn.functional as F
 import torchvision.models as models
 from torchvision import transforms
 from PIL import Image
+import time
 
-# --- 1. 图像处理模块 ---
+# 图像处理模块
 
 class ImageProcessor:
     def __init__(self, device, mode='caffe'):
@@ -38,7 +39,7 @@ class ImageProcessor:
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         img.save(path)
 
-# --- 2. 特征提取模块 ---
+# 特征提取模块
 
 class FeatureExtractor(nn.Module):
     VGG_MAP = {'relu1_1': 1, 'relu2_1': 6, 'relu3_1': 11, 'relu4_1': 20, 'relu4_2': 22, 'relu5_1': 29}
@@ -66,7 +67,7 @@ class FeatureExtractor(nn.Module):
                 break
         return features
 
-# --- 3. 损失函数与模型核心 ---
+# 损失函数与模型核心
 
 class StyleTransferEngine:
     def __init__(self, extractor, processor, config):
@@ -113,10 +114,9 @@ class StyleTransferEngine:
         return self.cfg.tv_weight * (torch.sum(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:])) + 
                                      torch.sum(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])))
 
-# --- 4. 主程序逻辑 ---
+# 主程序逻辑
 
 def main():
-    # ... (此处省略 argparse 解析过程，假设已解析为 args) ...
     parser = argparse.ArgumentParser()
     parser.add_argument('-style_image')
     parser.add_argument('-style_blend_weights', default='')
@@ -207,4 +207,9 @@ def main():
     processor.postprocess_and_save(input_img, args.output_image)
 
 if __name__ == '__main__':
+    start_time = time.time()
     main()
+    end_time = time.time()
+    print(f"Total time: {end_time - start_time:.2f} seconds")
+
+'''python lap_style.py -content_image images/megan.png -style_image images/starry_night.jpg -output_image output/lap_stylized.png'''

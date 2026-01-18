@@ -6,8 +6,7 @@ import torch.nn.functional as F
 import torchvision.models as models
 from torchvision import transforms
 from PIL import Image
-
-# --- 新增：正则化模块 ---
+import time
 
 class Regularizer:
     @staticmethod
@@ -33,7 +32,6 @@ class Regularizer:
         content_lap = F.conv2d(content_img, kernel, groups=3, padding=1)
         return F.mse_loss(input_lap, content_lap)
 
-# --- 原始代码逻辑保持不变，部分封装调整 ---
 
 class ImageProcessor:
     def __init__(self, device, mode='caffe'):
@@ -117,6 +115,8 @@ def main():
     c_img = proc.load(args.content_image)
     s_img = proc.load(args.style_image)
 
+    start_time = time.time()
+
     style_layers = ['relu1_1', 'relu2_1', 'relu3_1', 'relu4_1', 'relu5_1']
     content_layers = ['relu4_2']
 
@@ -164,10 +164,15 @@ def main():
         return total_loss
 
     optimizer.step(closure)
+
+    end_time = time.time()
+    print(f"Total time: {end_time - start_time:.2f} seconds")
     
     input_img.data.clamp_(0, 1)
-    proc.postprocess_and_save(input_img, "output/output_refined.png")
-    print("Optimization finished. Image saved to output/output_refined.png")
+    proc.postprocess_and_save(input_img, "output/WD_lap_stylized.png")
+    print("Optimization finished. Image saved to output/WD_lap_stylized.png")
 
 if __name__ == '__main__':
     main()
+
+'''python WD_lap_style.py -content_image images/megan.png -style_image images/starry_night.jpg '''
