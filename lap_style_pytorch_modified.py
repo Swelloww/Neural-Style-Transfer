@@ -1,17 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Masked (foreground/background) style transfer based on a minimal PyTorch port of lap_style.lua
-
-New features added:
-- You can specify different style images for background and subject (foreground)
-  - -style_image_bg ...  (can be multi-style comma-separated)
-  - -style_image_fg ...  (can be multi-style comma-separated)
-- The code automatically estimates a subject mask from the content image (default: DeepLabV3)
-  - Foreground = the most dominant non-background semantic class
-  - Background = 1 - Foreground
-- Style loss is computed separately on foreground/background regions using masked Gram matrices
-
 Example:
 CUDA_VISIBLE_DEVICES=2 python lap_style_pytorch_modified.py \
   -content_image images/goat.png \
@@ -20,11 +7,6 @@ CUDA_VISIBLE_DEVICES=2 python lap_style_pytorch_modified.py \
   -output_image output/bosong_fg_muse_bg_starry_night.png \
   -content_weight 15 -style_weight 90 -num_iterations 1000 -tv_weight 0.01 \
   -lap_layers 3 -lap_weights 70
-
-Notes:
-- If segmentation weights are not cached, torchvision may download them automatically.
-- You can force a simpler mask with: -mask_method center
-- You can provide your own mask image (white=foreground, black=background): -mask_image path/to/mask.png
 """
 
 import argparse
@@ -36,8 +18,6 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 import torchvision.models as models
 from torchvision.models import VGG19_Weights
-
-# Optional segmentation imports (will fallback if unavailable)
 try:
     import torchvision.models.segmentation as seg_models
     from torchvision.models.segmentation import DeepLabV3_ResNet50_Weights
@@ -45,16 +25,11 @@ try:
 except Exception:
     _HAS_SEG = False
 
-# -----------------------------
-# Utilities
-# -----------------------------
-
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 def _lanczos_resample():
-    # Pillow compatibility across versions
     if hasattr(Image, "Resampling"):
         return Image.Resampling.LANCZOS
     return Image.LANCZOS
@@ -91,7 +66,6 @@ def save_image(tensor, path):
 
 
 def save_mask(mask01, path):
-    # mask01: [1,1,H,W] float in [0,1]
     m = mask01.detach().cpu().clamp(0, 1)
     m = (m.squeeze(0).squeeze(0) * 255.0).byte()
     img = Image.fromarray(m.numpy(), mode="L")
@@ -107,17 +81,11 @@ def gram_matrix(y):
 
 
 def gram_matrix_masked(feat, mask01):
-    """
-    Masked Gram matrix.
-    feat:  [B, C, H, W]
-    mask01:[B, 1, H, W] in [0,1]
-    """
     b, c, h, w = feat.shape
     masked = feat * mask01
     features = masked.view(b, c, h * w)
     G = torch.bmm(features, features.transpose(1, 2))
-    # normalize by effective pixels
-    denom = (mask01.sum(dim=(2, 3), keepdim=True).clamp(min=1.0))  # [B,1,1,1]
+    denom = (mask01.sum(dim=(2, 3), keepdim=True).clamp(min=1.0))
     denom = denom.view(b, 1, 1) * c
     return G / denom
 
@@ -158,10 +126,6 @@ def parse_float_list(s):
     return [float(x) for x in s.split(",")]
 
 
-# -----------------------------
-# VGG Feature extraction
-# -----------------------------
-
 VGG_LAYER_MAP = {
     "relu1_1": 1,
     "relu2_1": 6,
@@ -185,59 +149,43 @@ def get_features(x, cnn, layer_indices):
     return features
 
 
-# -----------------------------
-# Foreground/Background mask
-# -----------------------------
-
 def _center_prior_mask(h, w, device):
-    # Smooth center prior (values in [0,1])
     yy = torch.linspace(-1.0, 1.0, h, device=device)
     xx = torch.linspace(-1.0, 1.0, w, device=device)
     Y, X = torch.meshgrid(yy, xx, indexing="ij")
-    # ellipse-ish gaussian
     r = (X * X) / (0.65 * 0.65) + (Y * Y) / (0.65 * 0.65)
-    mask = torch.exp(-3.0 * r).clamp(0.0, 1.0)  # [H,W]
+    mask = torch.exp(-3.0 * r).clamp(0.0, 1.0)
     return mask.view(1, 1, h, w)
 
 
 def _morph_close_open(mask01, k=9, iters=1):
-    # Simple morphological close+open using pooling
-    # mask01: [1,1,H,W] float
     for _ in range(iters):
-        mask01 = F.max_pool2d(mask01, kernel_size=k, stride=1, padding=k // 2)      # dilate
-        mask01 = -F.max_pool2d(-mask01, kernel_size=k, stride=1, padding=k // 2)    # erode
-        # open
-        mask01 = -F.max_pool2d(-mask01, kernel_size=k, stride=1, padding=k // 2)    # erode
-        mask01 = F.max_pool2d(mask01, kernel_size=k, stride=1, padding=k // 2)      # dilate
+        mask01 = F.max_pool2d(mask01, kernel_size=k, stride=1, padding=k // 2)
+        mask01 = -F.max_pool2d(-mask01, kernel_size=k, stride=1, padding=k // 2)
+        mask01 = -F.max_pool2d(-mask01, kernel_size=k, stride=1, padding=k // 2)
+        mask01 = F.max_pool2d(mask01, kernel_size=k, stride=1, padding=k // 2)
     return mask01.clamp(0.0, 1.0)
 
 
 def _blur_mask(mask01, k=7, iters=1):
-    # Cheap edge softening
     for _ in range(iters):
         mask01 = F.avg_pool2d(mask01, kernel_size=k, stride=1, padding=k // 2)
     return mask01.clamp(0.0, 1.0)
 
 
 def load_user_mask(mask_path, device, out_hw):
-    # white=foreground, black=background
     pil = Image.open(mask_path).convert("L")
     pil = pil.resize((out_hw[1], out_hw[0]), _lanczos_resample())
-    t = transforms.ToTensor()(pil).unsqueeze(0).to(device)  # [1,1,H,W] in [0,1]
-    # Make it a bit crisper but still smooth
+    t = transforms.ToTensor()(pil).unsqueeze(0).to(device)
     t = _blur_mask(t, k=9, iters=1)
     return t.clamp(0.0, 1.0)
 
 
 def compute_foreground_mask(content_pil, device, out_hw, method="deeplab"):
-    """
-    Returns mask_fg in [0,1], shape [1,1,H,W].
-    Foreground = subject, Background = 1 - Foreground.
-    """
     H, W = out_hw
 
     if method == "none":
-        return torch.ones(1, 1, H, W, device=device)  # everything as foreground
+        return torch.ones(1, 1, H, W, device=device)
 
     if method == "center":
         mask = _center_prior_mask(H, W, device)
@@ -245,9 +193,7 @@ def compute_foreground_mask(content_pil, device, out_hw, method="deeplab"):
         mask = _blur_mask(mask, k=9, iters=1)
         return mask
 
-    # default: deeplab
     if not _HAS_SEG:
-        # segmentation module missing -> fallback
         mask = _center_prior_mask(H, W, device)
         mask = _blur_mask(mask, k=9, iters=1)
         return mask
@@ -256,41 +202,33 @@ def compute_foreground_mask(content_pil, device, out_hw, method="deeplab"):
         weights = DeepLabV3_ResNet50_Weights.DEFAULT
         seg_model = seg_models.deeplabv3_resnet50(weights=weights).to(device).eval()
 
-        # Prepare input
-        # Prefer official weights transforms if available; otherwise do a minimal safe preprocessing.
         try:
             preproc = weights.transforms()
-            inp = preproc(content_pil).unsqueeze(0).to(device)  # [1,3,h,w]
+            inp = preproc(content_pil).unsqueeze(0).to(device)
         except Exception:
-            # fallback
             inp = transforms.ToTensor()(content_pil)
             inp = transforms.Normalize(mean=weights.meta.get("mean", IMAGENET_MEAN),
                                        std=weights.meta.get("std", IMAGENET_STD))(inp)
             inp = inp.unsqueeze(0).to(device)
 
         with torch.no_grad():
-            out = seg_model(inp)["out"]  # [1,C,h,w]
-            labels = out.argmax(1, keepdim=True)  # [1,1,h,w]
+            out = seg_model(inp)["out"]
+            labels = out.argmax(1, keepdim=True)
 
-        # Choose the dominant non-background class as subject
-        lbl = labels.squeeze(0).squeeze(0)  # [h,w]
+        lbl = labels.squeeze(0).squeeze(0)
         num_classes = out.shape[1]
         counts = torch.bincount(lbl.reshape(-1), minlength=num_classes)
         if num_classes <= 1 or counts[1:].max().item() == 0:
-            # everything predicted as background
             mask_small = _center_prior_mask(lbl.shape[0], lbl.shape[1], device)
         else:
             best = int(torch.argmax(counts[1:]).item() + 1)
-            mask_small = (labels == best).float()  # [1,1,h,w]
+            mask_small = (labels == best).float()
 
-        # Resize to content size
         mask = F.interpolate(mask_small, size=(H, W), mode="bilinear", align_corners=False).clamp(0.0, 1.0)
 
-        # refine
         mask = _morph_close_open(mask, k=11, iters=1)
         mask = _blur_mask(mask, k=9, iters=1)
 
-        # sanity fallback
         area = mask.mean().item()
         if area < 0.02 or area > 0.98:
             mask = _center_prior_mask(H, W, device)
@@ -299,15 +237,10 @@ def compute_foreground_mask(content_pil, device, out_hw, method="deeplab"):
         return mask.clamp(0.0, 1.0)
 
     except Exception:
-        # Any failure -> fallback
         mask = _center_prior_mask(H, W, device)
         mask = _blur_mask(mask, k=9, iters=1)
         return mask
 
-
-# -----------------------------
-# Style target builder
-# -----------------------------
 
 def _normalize_blend_weights(ws, n):
     if ws and len(ws) == n:
@@ -319,9 +252,6 @@ def _normalize_blend_weights(ws, n):
 
 
 def build_style_targets(style_imgs, style_blend_weights, cnn, all_indices, style_indices, apply_preprocess):
-    """
-    style_targets[idx] = blended Gram matrix (unmasked, but compatible with masked Gram normalization)
-    """
     if len(style_imgs) == 0:
         return {idx: None for idx in style_indices}
 
@@ -331,7 +261,7 @@ def build_style_targets(style_imgs, style_blend_weights, cnn, all_indices, style
         feats_list = [get_features(apply_preprocess(s), cnn, all_indices) for s in style_imgs]
 
     targets = {}
-    ones_cache = {}  # cache ones masks by spatial size
+    ones_cache = {}
 
     for si in style_indices:
         G_sum = None
@@ -341,49 +271,38 @@ def build_style_targets(style_imgs, style_blend_weights, cnn, all_indices, style
             key = (h, w_)
             if key not in ones_cache:
                 ones_cache[key] = torch.ones(1, 1, h, w_, device=f.device)
-            g = gram_matrix_masked(f, ones_cache[key])  # == standard gram scaling
+            g = gram_matrix_masked(f, ones_cache[key])
             G_sum = w * g if G_sum is None else (G_sum + w * g)
         targets[si] = G_sum
     return targets
 
 
-# -----------------------------
-# Main
-# -----------------------------
-
 def main():
     parser = argparse.ArgumentParser()
 
-    # Content and output
     parser.add_argument("-content_image", required=True)
     parser.add_argument("-output_image", default="out.png")
 
-    # Original (single) style arg kept for backward compatibility:
-    parser.add_argument("-style_image", default="")  # if provided, used for both bg/fg unless bg/fg given
+    parser.add_argument("-style_image", default="")
 
-    # New: separate styles
     parser.add_argument("-style_image_bg", default="")
     parser.add_argument("-style_image_fg", default="")
-    parser.add_argument("-style_blend_weights", default="")       # legacy (applies to both if bg/fg not given)
+    parser.add_argument("-style_blend_weights", default="")
     parser.add_argument("-style_blend_weights_bg", default="")
     parser.add_argument("-style_blend_weights_fg", default="")
 
-    # Device
     parser.add_argument("-gpu", default="0")
 
-    # Weights
     parser.add_argument("-content_weight", type=float, default=5e0)
     parser.add_argument("-style_weight", type=float, default=1e2)
     parser.add_argument("-style_weight_bg", type=float, default=-1.0)  # if <0 => use style_weight
     parser.add_argument("-style_weight_fg", type=float, default=-1.0)  # if <0 => use style_weight
     parser.add_argument("-tv_weight", type=float, default=1e-2)
 
-    # Laplacian
     parser.add_argument("-lap_weights", default="100")
     parser.add_argument("-lap_layers", default="2")
-    parser.add_argument("-lap_nobp", action="store_true")  # kept (not used specially here)
+    parser.add_argument("-lap_nobp", action="store_true")
 
-    # Optimization
     parser.add_argument("-num_iterations", type=int, default=1000)
     parser.add_argument("-init", default="random", choices=["random", "content", "image"])
     parser.add_argument("-init_image", default="")
@@ -392,7 +311,6 @@ def main():
     parser.add_argument("-print_iter", type=int, default=50)
     parser.add_argument("-save_iter", type=int, default=200)
 
-    # Style transfer config
     parser.add_argument("-style_scale", type=float, default=1.0)
     parser.add_argument("-seed", type=int, default=-1)
     parser.add_argument("-content_layers", default="relu4_2")
@@ -404,14 +322,12 @@ def main():
         help="Input preprocessing: imagenet (torchvision) or caffe (BGR*255 - mean)",
     )
 
-    # Mask controls
     parser.add_argument("-mask_method", default="deeplab", choices=["deeplab", "center", "none"])
-    parser.add_argument("-mask_image", default="")  # user-provided mask (white=FG)
-    parser.add_argument("-mask_output", default="")  # optional path to save computed FG mask
+    parser.add_argument("-mask_image", default="")
+    parser.add_argument("-mask_output", default="")
 
     args = parser.parse_args()
 
-    # Device
     device = torch.device("cpu")
     if args.gpu is not None and args.gpu != "-1":
         try:
@@ -422,17 +338,14 @@ def main():
     if args.seed is not None and args.seed >= 0:
         torch.manual_seed(args.seed)
 
-    # Load content image (PIL + tensor)
     content_pil = load_image_pil(args.content_image)
     content_img = pil_to_tensor(content_pil, device)
 
     _, _, H, W = content_img.shape
 
-    # Resolve background/foreground style paths (backward compatible)
     if args.style_image_bg or args.style_image_fg:
         bg_paths = args.style_image_bg.split(",") if args.style_image_bg else []
         fg_paths = args.style_image_fg.split(",") if args.style_image_fg else []
-        # If only one provided, reuse it for the other
         if not bg_paths and fg_paths:
             bg_paths = fg_paths
         if not fg_paths and bg_paths:
@@ -441,7 +354,6 @@ def main():
         bg_ws = parse_float_list(args.style_blend_weights_bg)
         fg_ws = parse_float_list(args.style_blend_weights_fg)
     else:
-        # legacy: single style_image applies to both
         legacy_paths = args.style_image.split(",") if args.style_image else []
         bg_paths = legacy_paths
         fg_paths = legacy_paths
@@ -449,7 +361,6 @@ def main():
         bg_ws = legacy_ws
         fg_ws = legacy_ws
 
-    # Load style images (optionally scaled)
     def load_style_list(paths):
         imgs = []
         for p in paths:
@@ -473,9 +384,7 @@ def main():
             "or -style_image_bg and -style_image_fg."
         )
 
-    # VGG19
     cnn_model = models.vgg19(weights=VGG19_Weights.DEFAULT)
-    # Try to load converted caffe weights if present (kept from your original script)
     converted_paths = [
         os.path.join("lapstyle", "models", "vgg19_caffe.pth"),
         os.path.join("lapstyle", "models", "VGG_ILSVRC_19_layers.pth"),
@@ -493,7 +402,6 @@ def main():
 
     cnn = cnn_model.features.to(device).eval()
 
-    # Layer indices
     content_layer_names = [x.strip() for x in args.content_layers.split(",") if x.strip()]
     style_layer_names = [x.strip() for x in args.style_layers.split(",") if x.strip()]
 
@@ -501,19 +409,16 @@ def main():
     style_indices = [VGG_LAYER_MAP.get(n, VGG_LAYER_MAP["relu1_1"]) for n in style_layer_names]
     all_indices = sorted(set(content_indices + style_indices))
 
-    # Preprocess function
     def apply_preprocess(tensor):
         if args.preprocess == "imagenet":
             return normalize_batch(tensor, device)
         else:
-            # caffe style: RGB -> BGR, *255, subtract mean pixel
             mean_pixel = torch.tensor([103.939, 116.779, 123.68], device=device).view(1, 3, 1, 1)
             t = tensor * 255.0
             t = t[:, [2, 1, 0], :, :]  # BGR
             t = t - mean_pixel
             return t
 
-    # Foreground mask
     if args.mask_image:
         mask_fg = load_user_mask(args.mask_image, device, out_hw=(H, W))
     else:
@@ -525,16 +430,13 @@ def main():
         save_mask(mask_fg, args.mask_output)
         print("Saved foreground mask to", args.mask_output)
 
-    # Content targets
     with torch.no_grad():
         content_feats = get_features(apply_preprocess(content_img), cnn, all_indices)
     content_targets = {idx: content_feats[idx] for idx in content_indices}
 
-    # Style targets (separately for bg/fg)
     style_targets_bg = build_style_targets(style_imgs_bg, bg_ws, cnn, all_indices, style_indices, apply_preprocess)
     style_targets_fg = build_style_targets(style_imgs_fg, fg_ws, cnn, all_indices, style_indices, apply_preprocess)
 
-    # Laplacian targets
     lap_layers = parse_int_list(args.lap_layers)
     lap_weights = parse_float_list(args.lap_weights)
     if len(lap_weights) == 1 and len(lap_layers) > 1:
@@ -548,7 +450,6 @@ def main():
         lt = lap_conv(pooled)
         lap_targets.append(lt.detach())
 
-    # Init image
     if args.init == "random":
         input_img = torch.randn_like(content_img).mul(0.001).to(device).requires_grad_(True)
     elif args.init == "image":
@@ -561,7 +462,6 @@ def main():
     else:
         input_img = content_img.clone().requires_grad_(True)
 
-    # Optimizer
     if args.optimizer == "lbfgs":
         optimizer = torch.optim.LBFGS([input_img], lr=args.learning_rate)
     else:
@@ -580,12 +480,10 @@ def main():
 
         feats = get_features(apply_preprocess(input_img), cnn, all_indices)
 
-        # Content loss (full image)
         loss_c = 0.0
         for idx in content_indices:
             loss_c = loss_c + args.content_weight * mse(feats[idx], content_targets[idx])
 
-        # Style loss (masked bg/fg)
         loss_s = 0.0
         for idx in style_indices:
             f = feats[idx]
@@ -599,7 +497,6 @@ def main():
             loss_s = loss_s + style_weight_fg * mse(G_fg, style_targets_fg[idx])
             loss_s = loss_s + style_weight_bg * mse(G_bg, style_targets_bg[idx])
 
-        # Laplacian loss (full image, multi-scale)
         loss_l = 0.0
         for i, (layer_idx, lw) in enumerate(zip(lap_layers, lap_weights)):
             ps = 2 ** layer_idx
@@ -607,7 +504,6 @@ def main():
             lt = lap_conv(pooled)
             loss_l = loss_l + lw * mse(lt, lap_targets[i])
 
-        # TV loss
         loss_tv = args.tv_weight * total_variation_loss(input_img)
 
         loss = loss_c + loss_s + loss_l + loss_tv
