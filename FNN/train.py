@@ -58,7 +58,7 @@ def train():
         print(f"加载成功！将从第 {start_epoch + 1} 个 Epoch 继续训练。")
 
 
-    # 预计算风格特征 (集成思想的核心)
+    # 预计算风格特征
     print(f"Pre-calculating features for style: {STYLE_IMAGE_PATH}")
     style_img = load_image(STYLE_IMAGE_PATH, size=TRAIN_IMAGE_SIZE)
     style_tensor = transforms.ToTensor()(style_img).unsqueeze(0).to(DEVICE).mul(255)

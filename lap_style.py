@@ -143,7 +143,7 @@ def main():
     parser.add_argument('-preprocess', default='caffe', choices=['imagenet','caffe'],
                         help='Input preprocessing: imagenet (torchvision) or caffe (BGR*255 - mean)')
     args = parser.parse_args()
-    # 辅助解析：将 lap_layers 和 lap_weights 合并为配置
+
     args.content_layers = args.content_layers.split(',')
     args.style_layers = args.style_layers.split(',')
     lap_layers = [int(x) for x in args.lap_layers.split(',')]
@@ -169,7 +169,7 @@ def main():
             pooled = F.avg_pool2d(content_img, kernel_size=ps, stride=ps)
             lap_targets.append(engine.lap_conv(pooled).detach())
 
-        # Style targets (此处简化了多风格融合逻辑，可根据需要保留原有的 blend 逻辑)
+        # Style targets
         style_img = processor.load(args.style_image)
         s_prep = processor.preprocess(style_img)
         s_feats = extractor(s_prep, args.style_layers)

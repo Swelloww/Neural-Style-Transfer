@@ -35,7 +35,7 @@ def sliced_wasserstein_loss(input_features, target_features, num_projections=64)
     target_flat = target_features.view(b, c, -1)
     
     # 生成随机投影向量 [C, num_projections]
-    # 注意：为了稳定，可以在此处固定随机种子，或者每次迭代随机
+    # 为了稳定，可以在此处固定随机种子，或者每次迭代随机
     device = input_features.device
     projections = torch.randn(c, num_projections).to(device)
     projections = projections / torch.sqrt(torch.sum(projections**2, dim=0, keepdim=True))
